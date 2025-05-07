@@ -1,0 +1,253 @@
+import time
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from tabulate import tabulate
+import matplotlib
+
+# Set safe font explicitly to avoid emoji/glyph issues
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+
+# Helper to sanitize labels for plotting (remove emojis/unicode issues)
+def sanitize(text):
+    return ''.join(c for c in str(text) if ord(c) < 128)
+
+class Item:
+    def __init__(self, item_id: int, name: str, base_price: int):
+        self.item_id = item_id
+        self.name = name
+        self.base_price = base_price
+        self.current_price = base_price
+        self.price_history = [base_price]
+
+@dataclass
+class Order:
+    player_id: str
+    item_id: int
+    item_name: str
+    quantity: int
+    price_per_item: int
+    is_buy_order: bool
+    timestamp: float = field(default_factory=time.time)
+    fulfilled_quantity: int = 0
+
+    @property
+    def remaining_quantity(self) -> int:
+        return self.quantity - self.fulfilled_quantity
+
+    @property
+    def is_complete(self) -> bool:
+        return self.fulfilled_quantity >= self.quantity
+
+class Player:
+    def __init__(self, player_id: str, gold: int = 1000000):
+        self.player_id = player_id
+        self.gold = gold
+        self.inventory = {}
+        self.active_orders = []
+        self.order_history = []
+
+    def add_item(self, item_id: int, name: str, quantity: int):
+        if item_id in self.inventory:
+            self.inventory[item_id]['quantity'] += quantity
+        else:
+            self.inventory[item_id] = {'name': name, 'quantity': quantity}
+
+    def remove_item(self, item_id: int, quantity: int) -> bool:
+        if item_id in self.inventory and self.inventory[item_id]['quantity'] >= quantity:
+            self.inventory[item_id]['quantity'] -= quantity
+            if self.inventory[item_id]['quantity'] == 0:
+                del self.inventory[item_id]
+            return True
+        return False
+
+    def add_gold(self, amount: int):
+        self.gold += amount
+
+    def remove_gold(self, amount: int) -> bool:
+        if self.gold >= amount:
+            self.gold -= amount
+            return True
+        return False
+
+    def display_inventory(self):
+        if not self.inventory:
+            print(f"{self.player_id}'s inventory is empty.")
+            return
+        inventory_data = [[item_id, details['name'], details['quantity']] for item_id, details in self.inventory.items()]
+        headers = ["Item ID", "Item Name", "Quantity"]
+        print(f"\n{self.player_id}'s Inventory:")
+        print(tabulate(inventory_data, headers=headers, tablefmt="grid"))
+
+    def display_gold(self):
+        print(f"{self.player_id}'s Gold: {self.gold:,} gp")
+
+class GrandExchange:
+    def __init__(self):
+        self.items = {}
+        self.players = {}
+        self.buy_orders = []
+        self.sell_orders = []
+        self.ge_storage = {}
+        self.transaction_history = []
+        self.market_tax = 0.01
+
+    def register_item(self, item: Item):
+        self.items[item.item_id] = item
+
+    def register_player(self, player: Player):
+        self.players[player.player_id] = player
+
+    def deposit_to_ge(self, player_id: str, item_id: int, quantity: int, price_per_item: int) -> bool:
+        player = self.players.get(player_id)
+        if not player or item_id not in self.items or not player.remove_item(item_id, quantity):
+            return False
+        item_name = self.items[item_id].name
+        storage_key = f"{player_id}_{item_id}"
+        if storage_key in self.ge_storage:
+            self.ge_storage[storage_key]['quantity'] += quantity
+            self.ge_storage[storage_key]['price'] = price_per_item
+        else:
+            self.ge_storage[storage_key] = {'name': item_name, 'quantity': quantity, 'owner': player_id, 'price': price_per_item}
+        order = Order(player_id, item_id, item_name, quantity, price_per_item, False)
+        self.sell_orders.append(order)
+        player.active_orders.append(order)
+        return True
+
+    def buy_from_ge(self, buyer_id: str, item_id: int, quantity: int) -> bool:
+        buyer = self.players.get(buyer_id)
+        if not buyer or item_id not in self.items:
+            return False
+        item_name = self.items[item_id].name
+        available_entries = [(key, entry) for key, entry in self.ge_storage.items() if key.split('_')[1] == str(item_id) and entry['quantity'] > 0]
+        if not available_entries:
+            return False
+        available_entries.sort(key=lambda x: x[1]['price'])
+        remaining_to_buy = quantity
+        for key, entry in available_entries:
+            if remaining_to_buy <= 0:
+                break
+            seller_id = entry['owner']
+            seller = self.players.get(seller_id)
+            if not seller:
+                continue
+            buy_quantity = min(remaining_to_buy, entry['quantity'])
+            price = entry['price']
+            cost = buy_quantity * price
+            if not buyer.remove_gold(cost):
+                continue
+            tax_amount = int(cost * self.market_tax)
+            seller.add_gold(cost - tax_amount)
+            entry['quantity'] -= buy_quantity
+            for order in self.sell_orders:
+                if order.player_id == seller_id and order.item_id == item_id and not order.is_complete:
+                    order.fulfilled_quantity += buy_quantity
+                    if order.is_complete:
+                        self.sell_orders.remove(order)
+                        seller.active_orders.remove(order)
+                        seller.order_history.append(order)
+                    break
+            self.transaction_history.append({
+                "buyer": buyer_id,
+                "seller": seller_id,
+                "item_id": item_id,
+                "item_name": item_name,
+                "quantity": buy_quantity,
+                "price": price,
+                "timestamp": time.time(),
+                "tax": tax_amount
+            })
+            buyer.add_item(item_id, item_name, buy_quantity)
+            if entry['quantity'] == 0:
+                del self.ge_storage[key]
+            remaining_to_buy -= buy_quantity
+        return remaining_to_buy < quantity
+
+    def display_visuals(self):
+        fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+
+        storage_df = pd.DataFrame([{
+            'Item Name': sanitize(entry['name']),
+            'Quantity': entry['quantity']
+        } for entry in self.ge_storage.values()])
+        if not storage_df.empty:
+            storage_df = storage_df.groupby('Item Name').sum().reset_index()
+            axs[0].pie(storage_df['Quantity'], labels=storage_df['Item Name'], autopct='%1.1f%%')
+            axs[0].set_title('GE Storage Distribution')
+
+        tx_df = pd.DataFrame(self.transaction_history)
+        if not tx_df.empty:
+            tx_df['item_name'] = tx_df['item_name'].apply(sanitize)
+            tx_df = tx_df.groupby('item_name')['quantity'].sum().sort_values(ascending=False)
+            tx_df.plot(kind='bar', title='Transaction Volume', ax=axs[1])
+            axs[1].set_ylabel('Quantity')
+
+        gold_data = {sanitize(player_id): player.gold for player_id, player in self.players.items()}
+        axs[2].pie(gold_data.values(), labels=gold_data.keys(), autopct='%1.1f%%')
+        axs[2].set_title('Gold Distribution')
+
+        plt.tight_layout()
+        plt.show()
+
+def create_sample_data():
+    ge = GrandExchange()
+    items = [Item(1, "Rune Scimitar", 25000), Item(2, "Dragon Bones", 3000), Item(3, "Nature Rune", 250), Item(4, "Abyssal Whip", 2500000), Item(5, "Lobster", 300)]
+    for item in items:
+        ge.register_item(item)
+    user1 = Player("User1", 5000000)
+    user2 = Player("User2", 10000000)
+    ge.register_player(user1)
+    ge.register_player(user2)
+    user1.add_item(1, "Rune Scimitar", 5)
+    user1.add_item(2, "Dragon Bones", 200)
+    user1.add_item(3, "Nature Rune", 1000)
+    user1.add_item(5, "Lobster", 500)
+    user2.add_item(4, "Abyssal Whip", 2)
+    return ge
+
+def main():
+    ge = create_sample_data()
+    user1 = ge.players["User1"]
+    user2 = ge.players["User2"]
+    while True:
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print("\n=== RuneScape Grand Exchange Simulation ===\n")
+        user1.display_gold()
+        user1.display_inventory()
+        user2.display_gold()
+        user2.display_inventory()
+        ge.display_visuals()
+        print("\nOptions:")
+        print("1. User1: Deposit item to Grand Exchange")
+        print("2. User2: Buy item from Grand Exchange")
+        print("3. Exit")
+        choice = input("\nEnter your choice (1-3): ")
+        if choice == "1":
+            user1.display_inventory()
+            try:
+                item_id = int(input("Enter item ID to deposit: "))
+                if item_id not in user1.inventory:
+                    input("Invalid item ID. Press Enter...")
+                    continue
+                max_quantity = user1.inventory[item_id]['quantity']
+                quantity = int(input(f"Enter quantity (max {max_quantity}): "))
+                price = int(input("Enter price per item: "))
+                ge.deposit_to_ge("User1", item_id, quantity, price)
+            except ValueError:
+                print("Invalid input.")
+            input("Press Enter to continue...")
+        elif choice == "2":
+            try:
+                item_id = int(input("Enter item ID to buy: "))
+                quantity = int(input("Enter quantity: "))
+                ge.buy_from_ge("User2", item_id, quantity)
+            except ValueError:
+                print("Invalid input.")
+            input("Press Enter to continue...")
+        elif choice == "3":
+            break
+
+if __name__ == "__main__":
+    main()
