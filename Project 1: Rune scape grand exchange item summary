@@ -1,0 +1,504 @@
+import random
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Deque
+
+
+class Item:
+    """Represents an item that can be traded on the Grand Exchange."""
+    
+    def __init__(self, item_id: int, name: str, base_price: int, 
+                 buy_limit: int = 1000, price_volatility: float = 0.05):
+        self.item_id = item_id
+        self.name = name
+        self.base_price = base_price
+        self.current_price = base_price
+        self.buy_limit = buy_limit  # Maximum amount a player can buy in 4 hours
+        self.price_volatility = price_volatility  # How much the price can fluctuate
+        self.daily_volume = 0
+        self.price_history = [base_price]
+    
+    def update_price(self, buy_pressure: int, sell_pressure: int):
+        """Update the item price based on buy and sell pressures."""
+        if buy_pressure == 0 and sell_pressure == 0:
+            # Small random fluctuation when no trading activity
+            fluctuation = random.uniform(-0.01, 0.01)
+        else:
+            # Calculate price change based on supply and demand
+            total_pressure = buy_pressure + sell_pressure
+            if total_pressure == 0:
+                ratio = 0
+            else:
+                ratio = (buy_pressure - sell_pressure) / total_pressure
+            
+            # Apply volatility factor
+            fluctuation = ratio * self.price_volatility
+        
+        # Apply price change with some constraints
+        new_price = self.current_price * (1 + fluctuation)
+        # Ensure price doesn't change too drastically
+        max_change = self.current_price * 0.1
+        if new_price > self.current_price + max_change:
+            new_price = self.current_price + max_change
+        elif new_price < self.current_price - max_change:
+            new_price = self.current_price - max_change
+        
+        # Ensure price doesn't go below 1 gp
+        self.current_price = max(1, int(new_price))
+        self.price_history.append(self.current_price)
+
+
+@dataclass
+class Order:
+    """Represents a buy or sell order in the Grand Exchange."""
+    
+    player_id: str
+    item_id: int
+    quantity: int
+    price_per_item: int
+    is_buy_order: bool
+    timestamp: float = field(default_factory=time.time)
+    fulfilled_quantity: int = 0
+    
+    @property
+    def remaining_quantity(self) -> int:
+        return self.quantity - self.fulfilled_quantity
+    
+    @property
+    def is_complete(self) -> bool:
+        return self.fulfilled_quantity >= self.quantity
+
+
+class Player:
+    """Represents a player interacting with the Grand Exchange."""
+    
+    def __init__(self, player_id: str, gold: int = 1000000):
+        self.player_id = player_id
+        self.gold = gold
+        self.inventory = {}  # item_id -> quantity
+        self.active_orders = []  # List of active orders
+        self.order_history = []  # List of completed orders
+        self.buy_limits = {}  # item_id -> {timestamp -> quantity} for 4-hour buy limits
+    
+    def add_item(self, item_id: int, quantity: int):
+        """Add items to player's inventory."""
+        if item_id in self.inventory:
+            self.inventory[item_id] += quantity
+        else:
+            self.inventory[item_id] = quantity
+    
+    def remove_item(self, item_id: int, quantity: int) -> bool:
+        """Remove items from player's inventory if available."""
+        if item_id in self.inventory and self.inventory[item_id] >= quantity:
+            self.inventory[item_id] -= quantity
+            if self.inventory[item_id] == 0:
+                del self.inventory[item_id]
+            return True
+        return False
+    
+    def add_gold(self, amount: int):
+        """Add gold to player's account."""
+        self.gold += amount
+    
+    def remove_gold(self, amount: int) -> bool:
+        """Remove gold from player's account if available."""
+        if self.gold >= amount:
+            self.gold -= amount
+            return True
+        return False
+    
+    def check_buy_limit(self, item_id: int, quantity: int) -> bool:
+        """Check if buying this quantity would exceed the 4-hour buy limit."""
+        current_time = time.time()
+        four_hours_ago = current_time - 14400  # 4 hours in seconds
+        
+        # Clean up expired entries
+        if item_id in self.buy_limits:
+            self.buy_limits[item_id] = {ts: qty for ts, qty in self.buy_limits[item_id].items() 
+                                      if ts > four_hours_ago}
+        
+        # Calculate current usage
+        current_usage = sum(self.buy_limits.get(item_id, {}).values())
+        return current_usage + quantity <= 1000  # Default buy limit
+
+
+class GrandExchange:
+    """Simulates the RuneScape Grand Exchange trading system."""
+    
+    def __init__(self):
+        self.items = {}  # item_id -> Item
+        self.players = {}  # player_id -> Player
+        self.buy_orders: Dict[int, Deque[Order]] = {}  # item_id -> queue of buy orders
+        self.sell_orders: Dict[int, Deque[Order]] = {}  # item_id -> queue of sell orders
+        self.transaction_history = []
+        self.market_tax = 0.01  # 1% tax on all sales
+    
+    def register_item(self, item: Item):
+        """Register a new item to be traded on the Grand Exchange."""
+        self.items[item.item_id] = item
+    
+    def register_player(self, player: Player):
+        """Register a player to trade on the Grand Exchange."""
+        self.players[player.player_id] = player
+    
+    def place_buy_order(self, player_id: str, item_id: int, quantity: int, price_per_item: int) -> Optional[Order]:
+        """Place a buy order on the Grand Exchange."""
+        # Validate the order
+        if item_id not in self.items:
+            print(f"Item ID {item_id} does not exist.")
+            return None
+        
+        player = self.players.get(player_id)
+        if not player:
+            print(f"Player {player_id} does not exist.")
+            return None
+        
+        total_cost = quantity * price_per_item
+        if not player.remove_gold(total_cost):
+            print(f"Player {player_id} doesn't have enough gold.")
+            return None
+        
+        if not player.check_buy_limit(item_id, quantity):
+            print(f"Buy limit exceeded for item {item_id}.")
+            player.add_gold(total_cost)  # Refund the gold
+            return None
+        
+        # Create and register the order
+        order = Order(player_id, item_id, quantity, price_per_item, True)
+        player.active_orders.append(order)
+        
+        # Add to order book
+        if item_id not in self.buy_orders:
+            self.buy_orders[item_id] = deque()
+        self.buy_orders[item_id].append(order)
+        
+        # Try to match with existing sell orders
+        self._match_orders(item_id)
+        
+        return order
+    
+    def place_sell_order(self, player_id: str, item_id: int, quantity: int, price_per_item: int) -> Optional[Order]:
+        """Place a sell order on the Grand Exchange."""
+        # Validate the order
+        if item_id not in self.items:
+            print(f"Item ID {item_id} does not exist.")
+            return None
+        
+        player = self.players.get(player_id)
+        if not player:
+            print(f"Player {player_id} does not exist.")
+            return None
+        
+        if not player.remove_item(item_id, quantity):
+            print(f"Player {player_id} doesn't have enough of item {item_id}.")
+            return None
+        
+        # Create and register the order
+        order = Order(player_id, item_id, quantity, price_per_item, False)
+        player.active_orders.append(order)
+        
+        # Add to order book
+        if item_id not in self.sell_orders:
+            self.sell_orders[item_id] = deque()
+        self.sell_orders[item_id].append(order)
+        
+        # Try to match with existing buy orders
+        self._match_orders(item_id)
+        
+        return order
+    
+    def _match_orders(self, item_id: int):
+        """Match buy and sell orders for a specific item."""
+        buy_queue = self.buy_orders.get(item_id, deque())
+        sell_queue = self.sell_orders.get(item_id, deque())
+        
+        buy_pressure = sum(order.remaining_quantity for order in buy_queue)
+        sell_pressure = sum(order.remaining_quantity for order in sell_queue)
+        
+        # Update item price based on supply and demand
+        if item_id in self.items:
+            self.items[item_id].update_price(buy_pressure, sell_pressure)
+        
+        # Try to match orders
+        while buy_queue and sell_queue:
+            buy_order = buy_queue[0]
+            sell_order = sell_queue[0]
+            
+            # If the buyer is willing to pay at least the seller's asking price
+            if buy_order.price_per_item >= sell_order.price_per_item:
+                # Determine the quantity to trade
+                trade_quantity = min(buy_order.remaining_quantity, sell_order.remaining_quantity)
+                
+                # Execute the trade at the sell price if it was placed first, otherwise at buy price
+                if sell_order.timestamp < buy_order.timestamp:
+                    trade_price = sell_order.price_per_item
+                else:
+                    trade_price = buy_order.price_per_item
+                
+                # Update order quantities
+                buy_order.fulfilled_quantity += trade_quantity
+                sell_order.fulfilled_quantity += trade_quantity
+                
+                # Update player inventories and gold
+                buyer = self.players[buy_order.player_id]
+                seller = self.players[sell_order.player_id]
+                
+                # Apply the market tax to the seller
+                selling_price = trade_price * trade_quantity
+                tax_amount = int(selling_price * self.market_tax)
+                seller.add_gold(selling_price - tax_amount)
+                
+                # Refund excess gold to buyer if they paid more than necessary
+                refund = (buy_order.price_per_item - trade_price) * trade_quantity
+                if refund > 0:
+                    buyer.add_gold(refund)
+                
+                # Add items to buyer's inventory
+                buyer.add_item(item_id, trade_quantity)
+                
+                # Update buy limits
+                current_time = time.time()
+                if item_id not in buyer.buy_limits:
+                    buyer.buy_limits[item_id] = {}
+                buyer.buy_limits[item_id][current_time] = trade_quantity
+                
+                # Record the transaction
+                transaction = {
+                    "buyer": buy_order.player_id,
+                    "seller": sell_order.player_id,
+                    "item_id": item_id,
+                    "quantity": trade_quantity,
+                    "price": trade_price,
+                    "timestamp": time.time(),
+                    "tax": tax_amount
+                }
+                self.transaction_history.append(transaction)
+                
+                # Update daily volume
+                self.items[item_id].daily_volume += trade_quantity
+                
+                # Remove completed orders
+                if buy_order.is_complete:
+                    buy_queue.popleft()
+                    buyer.active_orders.remove(buy_order)
+                    buyer.order_history.append(buy_order)
+                
+                if sell_order.is_complete:
+                    sell_queue.popleft()
+                    seller.active_orders.remove(sell_order)
+                    seller.order_history.append(sell_order)
+            else:
+                # No match possible with current top orders
+                break
+    
+    def cancel_order(self, player_id: str, order: Order) -> bool:
+        """Cancel an existing order and return assets to the player."""
+        player = self.players.get(player_id)
+        if not player or order not in player.active_orders:
+            return False
+        
+        # Remove from appropriate queue
+        queue = self.buy_orders.get(order.item_id, deque()) if order.is_buy_order else self.sell_orders.get(order.item_id, deque())
+        if order in queue:
+            queue.remove(order)
+        
+        # Return unfulfilled assets to player
+        unfulfilled = order.remaining_quantity
+        if order.is_buy_order:
+            # Return gold for unfulfilled buy order
+            refund = unfulfilled * order.price_per_item
+            player.add_gold(refund)
+        else:
+            # Return items for unfulfilled sell order
+            player.add_item(order.item_id, unfulfilled)
+        
+        # Move order from active to history
+        player.active_orders.remove(order)
+        player.order_history.append(order)
+        
+        return True
+    
+    def get_item_price(self, item_id: int) -> Optional[int]:
+        """Get the current price of an item."""
+        if item_id in self.items:
+            return self.items[item_id].current_price
+        return None
+    
+    def get_price_history(self, item_id: int) -> List[int]:
+        """Get the price history of an item."""
+        if item_id in self.items:
+            return self.items[item_id].price_history
+        return []
+    
+    def simulate_market_activity(self, num_iterations: int = 1):
+        """Simulate market activity with random buy/sell orders."""
+        for _ in range(num_iterations):
+            # Randomly select an item
+            if not self.items:
+                return
+            item_id = random.choice(list(self.items.keys()))
+            item = self.items[item_id]
+            
+            # Randomly decide to buy or sell
+            is_buy = random.choice([True, False])
+            
+            # Create a random player if needed
+            bot_player_id = f"Bot_{random.randint(1000, 9999)}"
+            if bot_player_id not in self.players:
+                bot_player = Player(bot_player_id, random.randint(100000, 10000000))
+                self.register_player(bot_player)
+                # Give the bot some inventory
+                for i in self.items:
+                    if random.random() < 0.3:  # 30% chance to have each item
+                        bot_player.add_item(i, random.randint(1, 1000))
+            
+            player = self.players[bot_player_id]
+            
+            # Determine quantity and price
+            quantity = random.randint(1, 100)
+            # Price varies around current price
+            price_variation = random.uniform(-0.1, 0.1)  # ±10%
+            price = max(1, int(item.current_price * (1 + price_variation)))
+            
+            # Place order
+            if is_buy:
+                if player.gold >= price * quantity:
+                    self.place_buy_order(bot_player_id, item_id, quantity, price)
+            else:
+                if item_id in player.inventory and player.inventory[item_id] >= quantity:
+                    self.place_sell_order(bot_player_id, item_id, quantity, price)
+    
+    def update_market(self):
+        """Update market prices based on current orders."""
+        for item_id in self.items:
+            buy_queue = self.buy_orders.get(item_id, deque())
+            sell_queue = self.sell_orders.get(item_id, deque())
+            
+            buy_pressure = sum(order.remaining_quantity for order in buy_queue)
+            sell_pressure = sum(order.remaining_quantity for order in sell_queue)
+            
+            self.items[item_id].update_price(buy_pressure, sell_pressure)
+            
+            # Try to match any outstanding orders
+            self._match_orders(item_id)
+
+
+# Example usage
+def create_sample_data():
+    """Create sample items and players for demonstration."""
+    ge = GrandExchange()
+    
+    # Create some items
+    items = [
+        Item(1, "Rune Scimitar", 25000, buy_limit=100, price_volatility=0.03),
+        Item(2, "Dragon Bones", 3000, buy_limit=500, price_volatility=0.07),
+        Item(3, "Nature Rune", 250, buy_limit=10000, price_volatility=0.02),
+        Item(4, "Abyssal Whip", 2500000, buy_limit=10, price_volatility=0.05),
+        Item(5, "Lobster", 300, buy_limit=5000, price_volatility=0.01),
+    ]
+    
+    for item in items:
+        ge.register_item(item)
+    
+    # Create some players
+    players = [
+        Player("Alice", 10000000),
+        Player("Bob", 5000000),
+        Player("Charlie", 20000000),
+    ]
+    
+    for player in players:
+        ge.register_player(player)
+    
+    # Give players some starting items
+    players[0].add_item(1, 5)  # Alice has 5 Rune Scimitars
+    players[0].add_item(3, 1000)  # Alice has 1000 Nature Runes
+    
+    players[1].add_item(2, 200)  # Bob has 200 Dragon Bones
+    players[1].add_item(5, 500)  # Bob has 500 Lobsters
+    
+    players[2].add_item(4, 3)  # Charlie has 3 Abyssal Whips
+    players[2].add_item(2, 100)  # Charlie has 100 Dragon Bones
+    
+    return ge
+
+
+def main():
+    """Run a simulation of the Grand Exchange."""
+    ge = create_sample_data()
+    
+    print("Welcome to the RuneScape Grand Exchange Simulation")
+    print("=" * 50)
+    
+    # Let's simulate some market activity
+    for day in range(1, 11):
+        print(f"\nDay {day} Market Report:")
+        print("-" * 30)
+        
+        # Simulate random market activity
+        ge.simulate_market_activity(20)
+        
+        # Update market prices
+        ge.update_market()
+        
+        # Print current prices
+        for item_id, item in ge.items.items():
+            print(f"{item.name}: {item.current_price} gp (Volume: {item.daily_volume})")
+        
+        # Reset daily volumes
+        for item in ge.items.values():
+            item.daily_volume = 0
+        
+        # Player activity
+        if day == 3:
+            # Alice buys dragon bones
+            print("\nAlice places a buy order for 50 Dragon Bones at 3100 gp each.")
+            ge.place_buy_order("Alice", 2, 50, 3100)
+        
+        if day == 5:
+            # Bob sells lobsters
+            print("\nBob places a sell order for 200 Lobsters at 320 gp each.")
+            ge.place_sell_order("Bob", 5, 200, 320)
+        
+        if day == 8:
+            # Charlie sells an Abyssal Whip
+            print("\nCharlie places a sell order for 1 Abyssal Whip at 2600000 gp.")
+            ge.place_sell_order("Charlie", 4, 1, 2600000)
+        
+        # Match any outstanding orders
+        for item_id in ge.items:
+            ge._match_orders(item_id)
+    
+    # Final report
+    print("\n" + "=" * 50)
+    print("Final Market Report")
+    print("=" * 50)
+    
+    # Print final prices and their history
+    for item_id, item in ge.items.items():
+        print(f"{item.name}:")
+        print(f"  Starting price: {item.base_price} gp")
+        print(f"  Final price: {item.current_price} gp")
+        print(f"  Change: {((item.current_price - item.base_price) / item.base_price) * 100:.2f}%")
+    
+    # Print player information
+    print("\nPlayer Information:")
+    for player_id, player in ge.players.items():
+        if not player_id.startswith("Bot_"):  # Skip bot players
+            print(f"\n{player_id}:")
+            print(f"  Gold: {player.gold} gp")
+            print("  Inventory:")
+            for item_id, quantity in player.inventory.items():
+                item_name = ge.items[item_id].name if item_id in ge.items else f"Unknown Item {item_id}"
+                print(f"    {item_name}: {quantity}")
+            
+            print("  Completed Orders:")
+            for order in player.order_history:
+                item_name = ge.items[order.item_id].name if order.item_id in ge.items else f"Unknown Item {order.item_id}"
+                order_type = "Buy" if order.is_buy_order else "Sell"
+                print(f"    {order_type} {order.fulfilled_quantity}/{order.quantity} {item_name} at {order.price_per_item} gp each")
+
+
+if __name__ == "__main__":
+    main()
