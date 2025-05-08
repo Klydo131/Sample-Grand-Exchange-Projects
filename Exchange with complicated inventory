@@ -1,0 +1,879 @@
+import time
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from tabulate import tabulate
+import numpy as np
+from datetime import datetime, timedelta
+
+class Item:
+    """Represents an item that can be traded on the Grand Exchange."""
+    
+    def __init__(self, item_id: int, name: str, base_price: int,  
+                 category: str = "Miscellaneous"):
+        self.item_id = item_id
+        self.name = name
+        self.base_price = base_price
+        self.current_price = base_price
+        self.price_history = [base_price]
+        self.timestamps = [time.time()]
+        self.category = category
+        self.volume_history = [0]  # Trading volume history
+        self.total_traded = 0
+
+
+@dataclass
+class Order:
+    """Represents a buy or sell order in the Grand Exchange."""
+    
+    player_id: str
+    item_id: int
+    item_name: str
+    quantity: int
+    price_per_item: int
+    is_buy_order: bool
+    timestamp: float = field(default_factory=time.time)
+    fulfilled_quantity: int = 0
+    
+    @property
+    def remaining_quantity(self) -> int:
+        return self.quantity - self.fulfilled_quantity
+    
+    @property
+    def is_complete(self) -> bool:
+        return self.fulfilled_quantity >= self.quantity
+
+
+class Player:
+    """Represents a player interacting with the Grand Exchange."""
+    
+    def __init__(self, player_id: str, gold: int = 1000000):
+        self.player_id = player_id
+        self.gold = gold
+        self.inventory = {}  # item_id -> {name, quantity, category}
+        self.active_orders = []  # List of active orders
+        self.order_history = []  # List of completed orders
+        self.transaction_values = []  # Track values of all transactions
+        self.transaction_timestamps = []  # Timestamps for transactions
+    
+    def add_item(self, item_id: int, name: str, quantity: int, category: str = "Miscellaneous"):
+        """Add items to player's inventory."""
+        if item_id in self.inventory:
+            self.inventory[item_id]['quantity'] += quantity
+        else:
+            self.inventory[item_id] = {
+                'name': name,  
+                'quantity': quantity,
+                'category': category
+            }
+    
+    def remove_item(self, item_id: int, quantity: int) -> bool:
+        """Remove items from player's inventory if available."""
+        if item_id in self.inventory and self.inventory[item_id]['quantity'] >= quantity:
+            self.inventory[item_id]['quantity'] -= quantity
+            if self.inventory[item_id]['quantity'] == 0:
+                del self.inventory[item_id]
+            return True
+        return False
+    
+    def add_gold(self, amount: int):
+        """Add gold to player's account."""
+        self.gold += amount
+        # Record transaction for financial analysis
+        self.transaction_values.append(amount)
+        self.transaction_timestamps.append(time.time())
+    
+    def remove_gold(self, amount: int) -> bool:
+        """Remove gold from player's account if available."""
+        if self.gold >= amount:
+            self.gold -= amount
+            # Record transaction for financial analysis
+            self.transaction_values.append(-amount)
+            self.transaction_timestamps.append(time.time())
+            return True
+        return False
+
+    def display_inventory(self):
+        """Display the player's inventory in a nicely formatted table."""
+        if not self.inventory:
+            print(f"{self.player_id}'s inventory is empty.")
+            return
+        
+        inventory_data = []
+        for item_id, details in self.inventory.items():
+            inventory_data.append([
+                item_id,  
+                details['name'],  
+                details['quantity'],
+                details['category']
+            ])
+        
+        headers = ["Item ID", "Item Name", "Quantity", "Category"]
+        print(f"\n{self.player_id}'s Inventory:")
+        print(tabulate(inventory_data, headers=headers, tablefmt="grid"))
+    
+    def display_gold(self):
+        """Display the player's gold."""
+        print(f"{self.player_id}'s Gold: {self.gold:,} gp")
+        
+    def plot_inventory_distribution(self):
+        """Plot the distribution of items in the player's inventory by category."""
+        if not self.inventory:
+            print(f"{self.player_id} has no items to display.")
+            return
+        
+        # Group items by category
+        categories = {}
+        for item_id, details in self.inventory.items():
+            category = details['category']
+            if category in categories:
+                categories[category] += 1
+            else:
+                categories[category] = 1
+        
+        # Create pie chart
+        plt.figure(figsize=(10, 6))
+        plt.pie(
+            categories.values(),  
+            labels=categories.keys(),  
+            autopct='%1.1f%%',
+            shadow=True,  
+            startangle=90
+        )
+        plt.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle
+        plt.title(f"{self.player_id}'s Inventory by Category")
+        plt.tight_layout()
+        plt.savefig(f"{self.player_id}_inventory_distribution.png")
+        plt.close()
+        
+        print(f"Saved inventory distribution chart to {self.player_id}_inventory_distribution.png")
+    
+    def plot_financial_history(self):
+        """Plot the player's financial history over time."""
+        if not self.transaction_timestamps:
+            print(f"{self.player_id} has no financial history to display.")
+            return
+        
+        # Convert timestamps to readable format
+        dates = [datetime.fromtimestamp(ts) for ts in self.transaction_timestamps]
+        
+        # Calculate cumulative sum of transactions
+        cumulative_wealth = np.cumsum(self.transaction_values)
+        
+        # Create the plot
+        plt.figure(figsize=(12, 6))
+        plt.plot(dates, cumulative_wealth, marker='o', linestyle='-', color='green')
+        plt.title(f"{self.player_id}'s Financial History")
+        plt.xlabel("Date")
+        plt.ylabel("Gold (cumulative)")
+        plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # Format y-axis to show values in thousands/millions
+        plt.gca().yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda x, _: f'{x/1000:.0f}k' if x < 1000000 else f'{x/1000000:.1f}M')
+        )
+        
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(f"{self.player_id}_financial_history.png")
+        plt.close()
+        
+        print(f"Saved financial history chart to {self.player_id}_financial_history.png")
+
+
+class MarketAnalytics:
+    """Provides market analysis tools for the Grand Exchange."""
+    
+    def __init__(self, grand_exchange):
+        self.ge = grand_exchange
+    
+    def generate_price_trend_chart(self, item_id=None, time_period=7):
+        """Generate price trend charts for items over time."""
+        if item_id is not None:
+            # Generate for specific item
+            if item_id in self.ge.items:
+                self._plot_item_price_trend(self.ge.items[item_id], time_period)
+            else:
+                print(f"Item ID {item_id} not found.")
+        else:
+            # Generate for all items
+            for item in self.ge.items.values():
+                self._plot_item_price_trend(item, time_period)
+    
+    def _plot_item_price_trend(self, item, time_period=7):
+        """Plot the price trend for a specific item."""
+        if len(item.price_history) < 2:
+            print(f"Not enough price history for {item.name} to generate trend.")
+            return
+        
+        # Convert timestamps to dates
+        dates = [datetime.fromtimestamp(ts) for ts in item.timestamps]
+        
+        # Filter for time period (if we have enough data)
+        if len(dates) > time_period:
+            start_idx = max(0, len(dates) - time_period)
+            dates = dates[start_idx:]
+            prices = item.price_history[start_idx:]
+        else:
+            prices = item.price_history
+            
+        # Create the plot
+        plt.figure(figsize=(12, 6))
+        plt.plot(dates, prices, marker='o', linestyle='-', color='blue')
+        
+        # Add moving average if we have enough data points
+        if len(prices) >= 3:
+            window = min(3, len(prices))
+            moving_avg = pd.Series(prices).rolling(window=window).mean()
+            plt.plot(dates, moving_avg, linestyle='--', color='red',  
+                     label=f'{window}-point Moving Average')
+            
+        plt.title(f"Price Trend for {item.name}")
+        plt.xlabel("Date")
+        plt.ylabel("Price (gp)")
+        plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # Format y-axis to show values in thousands/millions
+        plt.gca().yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda x, _: f'{x/1000:.0f}k' if x < 1000000 else f'{x/1000000:.1f}M')
+        )
+        
+        plt.xticks(rotation=45)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{item.name.replace(' ', '_')}_price_trend.png")
+        plt.close()
+        
+        print(f"Saved price trend chart to {item.name.replace(' ', '_')}_price_trend.png")
+    
+    def generate_market_volume_chart(self):
+        """Generate a chart showing trading volumes by item."""
+        items = list(self.ge.items.values())
+        
+        # Sort items by total volume traded
+        items.sort(key=lambda x: x.total_traded, reverse=True)
+        
+        # Get top 10 items by volume
+        top_items = items[:min(10, len(items))]
+        
+        if not top_items:
+            print("No trading volume data available.")
+            return
+            
+        names = [item.name for item in top_items]
+        volumes = [item.total_traded for item in top_items]
+        
+        plt.figure(figsize=(12, 8))
+        bars = plt.bar(names, volumes, color='skyblue')
+        
+        # Add value labels on top of each bar
+        for bar in bars:
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2., height,
+                     f'{height:,}',
+                     ha='center', va='bottom', rotation=0)
+        
+        plt.title("Trading Volume by Item")
+        plt.xlabel("Item")
+        plt.ylabel("Volume Traded")
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.savefig("market_volume_chart.png")
+        plt.close()
+        
+        print("Saved market volume chart to market_volume_chart.png")
+    
+    def generate_category_distribution_chart(self):
+        """Generate a pie chart showing the distribution of items by category."""
+        categories = {}
+        for item in self.ge.items.values():
+            if item.category in categories:
+                categories[item.category] += 1
+            else:
+                categories[item.category] = 1
+        
+        if not categories:
+            print("No category data available.")
+            return
+            
+        plt.figure(figsize=(10, 6))
+        plt.pie(
+            categories.values(),  
+            labels=categories.keys(),  
+            autopct='%1.1f%%',
+            shadow=True,  
+            startangle=90,
+            explode=[0.1 if cat == max(categories, key=categories.get) else 0 for cat in categories]
+        )
+        plt.axis('equal')
+        plt.title("Item Distribution by Category")
+        plt.tight_layout()
+        plt.savefig("category_distribution.png")
+        plt.close()
+        
+        print("Saved category distribution chart to category_distribution.png")
+    
+    def generate_market_summary(self):
+        """Generate a comprehensive market summary with tables and charts."""
+        print("\n===== GRAND EXCHANGE MARKET SUMMARY =====\n")
+        
+        # 1. Most active items (by volume)
+        items_by_volume = sorted(
+            self.ge.items.values(),  
+            key=lambda x: x.total_traded,  
+            reverse=True
+        )
+        
+        volume_data = []
+        for item in items_by_volume[:5]:  # Top 5 items
+            volume_data.append([
+                item.name,
+                item.category,
+                item.total_traded,
+                f"{item.current_price:,} gp",
+                f"{(item.current_price - item.base_price) / item.base_price:.2%}"
+            ])
+        
+        print("Top Items by Trading Volume:")
+        headers = ["Item", "Category", "Volume", "Current Price", "Price Change"]
+        print(tabulate(volume_data, headers=headers, tablefmt="grid"))
+        
+        # 2. Most volatile items (by price change)
+        items_by_volatility = sorted(
+            self.ge.items.values(),
+            key=lambda x: abs((x.current_price - x.base_price) / x.base_price),
+            reverse=True
+        )
+        
+        volatility_data = []
+        for item in items_by_volatility[:5]:  # Top 5 volatile items
+            volatility_data.append([
+                item.name,
+                item.category,
+                f"{item.base_price:,} gp",
+                f"{item.current_price:,} gp",
+                f"{(item.current_price - item.base_price) / item.base_price:.2%}"
+            ])
+        
+        print("\nMost Volatile Items (Price Change):")
+        headers = ["Item", "Category", "Base Price", "Current Price", "% Change"]
+        print(tabulate(volatility_data, headers=headers, tablefmt="grid"))
+        
+        # 3. Market supply (items available in GE)
+        supply_by_category = {}
+        for key, entry in self.ge.ge_storage.items():
+            item_id = int(key.split('_')[1])
+            category = self.ge.items[item_id].category
+            if category in supply_by_category:
+                supply_by_category[category] += entry['quantity']
+            else:
+                supply_by_category[category] = entry['quantity']
+        
+        supply_data = [[category, quantity] for category, quantity in supply_by_category.items()]
+        
+        print("\nCurrent Market Supply by Category:")
+        headers = ["Category", "Quantity Available"]
+        print(tabulate(supply_data, headers=headers, tablefmt="grid"))
+        
+        # Generate and save charts
+        self.generate_price_trend_chart()
+        self.generate_market_volume_chart()
+        self.generate_category_distribution_chart()
+        
+        print("\nMarket analysis complete. Charts have been saved to the current directory.")
+
+
+class GrandExchange:
+    """Simulates the RuneScape Grand Exchange trading system with visual tables and analytics."""
+    
+    def __init__(self):
+        self.items = {}  # item_id -> Item
+        self.players = {}  # player_id -> Player
+        self.buy_orders = []  # List of buy orders
+        self.sell_orders = []  # List of sell orders
+        self.ge_storage = {}  # item_id -> {name, quantity, owner, price}
+        self.transaction_history = []
+        self.market_tax = 0.01  # 1% tax on all sales
+        self.analytics = MarketAnalytics(self)
+    
+    def register_item(self, item: Item):
+        """Register a new item to be traded on the Grand Exchange."""
+        self.items[item.item_id] = item
+    
+    def register_player(self, player: Player):
+        """Register a player to trade on the Grand Exchange."""
+        self.players[player.player_id] = player
+    
+    def deposit_to_ge(self, player_id: str, item_id: int, quantity: int, price_per_item: int) -> bool:
+        """Player deposits items to the Grand Exchange for selling."""
+        player = self.players.get(player_id)
+        if not player:
+            print(f"Player {player_id} does not exist.")
+            return False
+        
+        if item_id not in self.items:
+            print(f"Item ID {item_id} does not exist.")
+            return False
+        
+        item = self.items[item_id]
+        item_name = item.name
+        
+        if not player.remove_item(item_id, quantity):
+            print(f"Player {player_id} doesn't have enough of item {item_name}.")
+            return False
+        
+        # Add to GE storage
+        storage_key = f"{player_id}_{item_id}"
+        if storage_key in self.ge_storage:
+            # Update existing entry
+            self.ge_storage[storage_key]['quantity'] += quantity
+            self.ge_storage[storage_key]['price'] = price_per_item  # Update price
+        else:
+            # Create new entry
+            self.ge_storage[storage_key] = {
+                'name': item_name,
+                'quantity': quantity,
+                'owner': player_id,
+                'price': price_per_item,
+                'category': item.category
+            }
+        
+        # Create a sell order
+        order = Order(player_id, item_id, item_name, quantity, price_per_item, False)
+        self.sell_orders.append(order)
+        player.active_orders.append(order)
+        
+        print(f"{player_id} has deposited {quantity} {item_name}(s) to the Grand Exchange at {price_per_item} gp each.")
+        return True
+    
+    def buy_from_ge(self, buyer_id: str, item_id: int, quantity: int) -> bool:
+        """Player buys items from the Grand Exchange."""
+        buyer = self.players.get(buyer_id)
+        if not buyer:
+            print(f"Player {buyer_id} does not exist.")
+            return False
+        
+        if item_id not in self.items:
+            print(f"Item ID {item_id} does not exist.")
+            return False
+        
+        item = self.items[item_id]
+        item_name = item.name
+        
+        # Find all storage entries for this item
+        available_entries = []
+        for key, entry in self.ge_storage.items():
+            if key.split('_')[1] == str(item_id) and entry['quantity'] > 0:
+                available_entries.append((key, entry))
+        
+        if not available_entries:
+            print(f"No {item_name} available in the Grand Exchange.")
+            return False
+        
+        # Sort by price (lowest first)
+        available_entries.sort(key=lambda x: x[1]['price'])
+        
+        remaining_to_buy = quantity
+        total_cost = 0
+        purchases = []
+        
+        for key, entry in available_entries:
+            if remaining_to_buy <= 0:
+                break
+            
+            seller_id = entry['owner']
+            seller = self.players.get(seller_id)
+            if not seller:
+                continue
+            
+            buy_quantity = min(remaining_to_buy, entry['quantity'])
+            price = entry['price']
+            cost = buy_quantity * price
+            
+            # Check if buyer has enough gold
+            if not buyer.remove_gold(cost):
+                print(f"Player {buyer_id} doesn't have enough gold.")
+                # Refund any previous purchases
+                for prev_quantity, prev_price, prev_seller_id in purchases:
+                    refund = prev_quantity * prev_price
+                    buyer.add_gold(refund)
+                    # Return items to GE storage
+                    seller_key = f"{prev_seller_id}_{item_id}"
+                    self.ge_storage[seller_key]['quantity'] += prev_quantity
+                return False
+            
+            # Process the purchase
+            total_cost += cost
+            entry['quantity'] -= buy_quantity
+            remaining_to_buy -= buy_quantity
+            
+            # Apply tax to seller
+            tax_amount = int(cost * self.market_tax)
+            seller_amount = cost - tax_amount
+            seller.add_gold(seller_amount)
+            
+            # Find and update the corresponding sell order
+            for order in self.sell_orders:
+                if order.player_id == seller_id and order.item_id == item_id and not order.is_complete:
+                    order.fulfilled_quantity += buy_quantity
+                    if order.is_complete:
+                        self.sell_orders.remove(order)
+                        seller.active_orders.remove(order)
+                        seller.order_history.append(order)
+                    break
+            
+            # Record the transaction
+            transaction = {
+                "buyer": buyer_id,
+                "seller": seller_id,
+                "item_id": item_id,
+                "item_name": item_name,
+                "quantity": buy_quantity,
+                "price": price,
+                "timestamp": time.time(),
+                "tax": tax_amount
+            }
+            self.transaction_history.append(transaction)
+            
+            # Update item data for analytics
+            item.total_traded += buy_quantity
+            item.price_history.append(price)
+            item.timestamps.append(time.time())
+            item.volume_history.append(buy_quantity)
+            
+            # Add to buyer's inventory
+            buyer.add_item(item_id, item_name, buy_quantity, item.category)
+            purchases.append((buy_quantity, price, seller_id))
+            
+            # Remove empty entries
+            if entry['quantity'] == 0:
+                del self.ge_storage[key]
+        
+        if remaining_to_buy == quantity:
+            print(f"Could not purchase any {item_name}.")
+            return False
+        
+        purchased = quantity - remaining_to_buy
+        print(f"{buyer_id} has purchased {purchased} {item_name}(s) for a total of {total_cost:,} gp.")
+        
+        if remaining_to_buy > 0:
+            print(f"Note: Could only purchase {purchased} out of {quantity} requested.")
+        
+        return True
+    
+    def display_ge_storage(self):
+        """Display all items currently in the Grand Exchange storage."""
+        if not self.ge_storage:
+            print("The Grand Exchange is currently empty.")
+            return
+        
+        storage_data = []
+        for key, entry in self.ge_storage.items():
+            item_id = int(key.split('_')[1])
+            storage_data.append([
+                item_id,
+                entry['name'],
+                entry['quantity'],
+                entry['owner'],
+                f"{entry['price']:,} gp",
+                entry['category']
+            ])
+        
+        headers = ["Item ID", "Item Name", "Quantity", "Seller", "Price/Item", "Category"]
+        print("\nGrand Exchange Market Listings:")
+        print(tabulate(storage_data, headers=headers, tablefmt="grid"))
+    
+    def display_transaction_history(self, limit=10):
+        """Display recent transaction history."""
+        if not self.transaction_history:
+            print("No transactions have occurred yet.")
+            return
+        
+        # Show most recent transactions first
+        recent_transactions = sorted(
+            self.transaction_history,  
+            key=lambda x: x['timestamp'],  
+            reverse=True
+        )[:limit]
+        
+        transaction_data = []
+        for tx in recent_transactions:
+            transaction_data.append([
+                tx['buyer'],
+                tx['seller'],  
+                tx['item_name'],
+                tx['quantity'],
+                f"{tx['price']:,} gp",
+                f"{tx['quantity'] * tx['price']:,} gp",
+                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(tx['timestamp']))
+            ])
+        
+        headers = ["Buyer", "Seller", "Item", "Quantity", "Price/Each", "Total", "Time"]
+        print(f"\nRecent Transactions (Last {min(limit, len(recent_transactions))}):")
+        print(tabulate(transaction_data, headers=headers, tablefmt="grid"))
+        
+    def plot_ge_storage_distribution(self):
+        """Plot the distribution of items in the GE by category."""
+        if not self.ge_storage:
+            print("The Grand Exchange is empty, no chart to generate.")
+            return
+        
+        # Group items by category
+        categories = {}
+        for key, entry in self.ge_storage.items():
+            category = entry['category']
+            if category in categories:
+                categories[category] += entry['quantity']
+            else:
+                categories[category] = entry['quantity']
+        
+        # Create pie chart
+        plt.figure(figsize=(10, 6))
+        plt.pie(
+            categories.values(),  
+            labels=categories.keys(),  
+            autopct='%1.1f%%',
+            shadow=True,  
+            startangle=90
+        )
+        plt.axis('equal')
+        plt.title("Grand Exchange Stock Distribution by Category")
+        plt.tight_layout()
+        plt.savefig("ge_stock_distribution.png")
+        plt.close()
+        
+        print("Saved GE stock distribution chart to ge_stock_distribution.png")
+        
+    def plot_price_heatmap(self):
+        """Create a heatmap showing relative prices of items."""
+        if len(self.items) < 2:
+            print("Not enough items to generate a price heatmap.")
+            return
+        
+        # Prepare data
+        item_names = []
+        item_prices = []
+        item_categories = []
+        
+        for item in self.items.values():
+            item_names.append(item.name)
+            item_prices.append(item.current_price)
+            item_categories.append(item.category)
+        
+        # Create a DataFrame
+        df = pd.DataFrame({
+            'Item': item_names,
+            'Price': item_prices,
+            'Category': item_categories
+        })
+        
+        # Sort by category then price
+        df = df.sort_values(['Category', 'Price'])
+        
+        # Create the heatmap
+        plt.figure(figsize=(12, 8))
+        
+        # Reshape data for heatmap
+        pivot_data = df.pivot_table(
+            index='Category',  
+            columns='Item',  
+            values='Price',  
+            aggfunc='mean'
+        )
+        
+        # Plot heatmap
+        sns.heatmap(
+            pivot_data,  
+            annot=True,  
+            fmt=".0f",  
+            cmap="YlGnBu",  
+            linewidths=.5
+        )
+        
+        plt.title("Item Price Heatmap by Category")
+        plt.tight_layout()
+        plt.savefig("price_heatmap.png")
+        plt.close()
+        
+        print("Saved price heatmap to price_heatmap.png")
+
+
+def clear_screen():
+    """Clear the console screen."""
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+
+def create_sample_data():
+    """Create sample items and players for demonstration."""
+    ge = GrandExchange()
+    
+    # Create items with categories
+    items = [
+        Item(1, "Rune Scimitar", 25000, "Weapons"),
+        Item(2, "Dragon Bones", 3000, "Materials"),
+        Item(3, "Nature Rune", 250, "Runes"),
+        Item(4, "Abyssal Whip", 2500000, "Weapons"),
+        Item(5, "Lobster", 300, "Food"),
+        Item(6, "Adamant Ore", 1200, "Materials"),
+        Item(7, "Yew Logs", 450, "Materials"),
+        Item(8, "Death Rune", 310, "Runes"),
+        Item(9, "Shark", 1000, "Food"),
+        Item(10, "Dragon Dagger", 35000, "Weapons"),
+    ]
+    
+    for item in items:
+        ge.register_item(item)
+    
+    # Create two players
+    user1 = Player("User1", 5000000)
+    user2 = Player("User2", 10000000)
+    
+    ge.register_player(user1)
+    ge.register_player(user2)
+    
+    # Give players some starting items - Removed initial inventory for user clarity
+    # user1.add_item(1, "Rune Scimitar", 5, "Weapons")
+    # user1.add_item(2, "Dragon Bones", 200, "Materials")
+    # user1.add_item(3, "Nature Rune", 1000, "Runes")
+    # user1.add_item(5, "Lobster", 500, "Food")
+    # user1.add_item(7, "Yew Logs", 300, "Materials")
+    # user1.add_item(8, "Death Rune", 750, "Runes")
+    
+    # user2.add_item(4, "Abyssal Whip", 2, "Weapons")
+    # user2.add_item(6, "Adamant Ore", 150, "Materials")
+    # user2.add_item(9, "Shark", 250, "Food")
+    # user2.add_item(10, "Dragon Dagger", 3, "Weapons")
+    
+    # Add some sample transaction history
+    sample_prices = {
+        1: [25000, 25200, 25100, 24900],
+        2: [3000, 3050, 3200, 3150],
+        3: [250, 240, 260, 255],
+        4: [2500000, 2520000, 2490000, 2550000],
+        5: [300, 290, 310, 320]
+    }
+    
+    # Simulate some price and volume history
+    for item_id, prices in sample_prices.items():
+        item = ge.items[item_id]
+        base_time = time.time() - (86400 * 7)  # Go back a week
+        
+        for i, price in enumerate(prices):
+            item.price_history.append(price)
+            item.timestamps.append(base_time + (86400 * i))  # One day intervals
+            volume = int(price * 0.1 * (0.8 + 0.4 * np.random.random()))  # Random volume
+            item.volume_history.append(volume)
+            item.total_traded += volume
+    
+    return ge
+
+
+
+def main():
+    """Run the RuneScape Grand Exchange simulation with visual inventory system and analytics."""
+    ge = create_sample_data()
+    user1 = ge.players["User1"]
+    user2 = ge.players["User2"]
+    
+    while True:
+        clear_screen()
+        print("\n=== RuneScape Grand Exchange Simulation with Analytics ===\n")
+        
+        # Display player info
+        user1.display_gold()
+        user1.display_inventory()        
+        user2.display_gold()
+        user2.display_inventory()
+        
+        # Display GE storage
+        ge.display_ge_storage()
+        
+        # Display recent transactions
+        ge.display_transaction_history(limit=5)
+        
+        # Generate and display market analytics
+        ge.analytics.generate_market_summary()
+        
+        # Display the distribution of items currently in the Grand Exchange
+        ge.plot_ge_storage_distribution()
+
+        # Generate a heatmap of item prices
+        ge.plot_price_heatmap()
+        
+        print("\nChoose an action:")
+        print("1. User1 Deposit Items")
+        print("2. User2 Buy Items")
+        print("3. Continue Simulation")
+        print("4. Exit")
+        
+        try:
+            choice = int(input("Enter your choice: "))
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+            time.sleep(2)
+            continue
+        except EOFError:
+            print("\nEOFError: No input received. Exiting simulation.")
+            break
+        
+        if choice == 1:
+            # User 1 Deposit
+            try:
+                item_id = int(input("Enter Item ID to deposit: "))
+                quantity = int(input("Enter quantity to deposit: "))
+                price = int(input("Enter price per item: "))
+                if item_id not in ge.items:
+                    print("Invalid Item ID")
+                    time.sleep(2)
+                elif quantity <=0 or price <= 0:
+                    print("Quantity and Price must be positive numbers.")
+                    time.sleep(2)
+                else:
+                    ge.deposit_to_ge("User1", item_id, quantity, price)
+                    time.sleep(2)
+            except ValueError:
+                print("Invalid input. Please enter numbers.")
+                time.sleep(2)
+        elif choice == 2:
+            # User 2 Buy
+            try:
+                item_id = int(input("Enter Item ID to buy: "))
+                quantity = int(input("Enter quantity to buy: "))
+                if item_id not in ge.items:
+                    print("Invalid Item ID")
+                    time.sleep(2)
+                elif quantity <= 0:
+                    print("Quantity must be a positive number.")
+                    time.sleep(2)
+                else:
+                    ge.buy_from_ge("User2", item_id, quantity)
+                    time.sleep(2)
+            except ValueError:
+                print("Invalid input. Please enter numbers.")
+                time.sleep(2)
+        elif choice == 3:
+            # Simulate time passing and price fluctuations
+            for item in ge.items.values():
+                # Simulate price changes (random walk with a small drift)
+                price_change = np.random.normal(0, 0.05)  # Mean 0, std dev 5%
+                item.current_price = max(1, int(item.current_price * (1 + price_change)))  # Ensure price > 0
+                item.price_history.append(item.current_price)
+                item.timestamps.append(time.time())
+                
+                # Simulate volume
+                volume = int(item.current_price * 0.1 * (0.5 + 0.5 * np.random.random()))
+                item.volume_history.append(volume)
+                item.total_traded += volume
+            time.sleep(2) # added sleep so the user can see the table before the screen gets cleared.
+        elif choice == 4:
+            print("Exiting simulation.")
+            break
+        else:
+            print("Invalid choice. Please try again.")
+            time.sleep(2)
+
+if __name__ == "__main__":
+    main()
